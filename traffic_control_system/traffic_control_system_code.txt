@@ -1,0 +1,461 @@
+#include <LiquidCrystal.h>
+
+#define car1_in A2
+#define car2_in A1
+#define car3_in A0
+#define car1_resource A3
+#define car2_resource A7
+#define car3_resource A6
+#define car1_out A5
+#define car2_out A4
+#define car3_out A8
+#define car1_ready A11
+#define car2_ready A10
+#define car3_ready A9
+
+#define RS 13
+#define E  12
+#define D7 11
+#define D6 10
+#define D5 9
+#define D4 8
+
+#define TASK_NUMBER 3
+#define SECTION_NUMBER 3
+
+// ----------------------------------------------------------------------------------------------
+
+// Class -> Task
+class Task
+{
+  private:
+    int type;               // [periodic -> typ==0] & [aperiodic -> type==1]
+    int nominal_priority;   // fixed priority based on DM algorithm
+    int dynamic_priority;   // dynamic priority based on NPP protocol
+    int act_time;           // activation time
+    int period;             // [periodic -> period!=0] & [aperiodic -> period==0]
+    int deadline;           // relative deadline
+    int wcet;               // execution time
+    int remaining_time;     // remaining execution time
+    int section1;           // section1 time
+    int section2;           // section2 time
+    int section3;           // section3 time
+
+  public:
+    int id;
+    
+    // constructor
+    Task(int _id, int _type, int _act_time, int _wcet, int _period, int _deadline, int _section1, int _section2, int _section3){
+      id = _id;
+      type = _type;
+      act_time = _act_time;
+      wcet = _wcet;
+      remaining_time = _wcet;
+      period = _period;
+      deadline = _deadline;
+      section1 = _section1;
+      section2 = _section2;
+      section3 = _section3;
+    }
+
+    // getter
+    int get_remaining_time(){
+      return remaining_time;
+    }
+    
+    int get_act_time(){
+      return act_time;
+    }
+
+    int get_nominal_priority(){
+      return nominal_priority;
+    }
+
+    int get_dynamic_priority(){
+      return dynamic_priority;
+    }
+
+    int get_id(){
+      return id;
+    }
+
+    int get_deadline(){
+      return deadline;
+    }
+
+    int get_type(){
+      return type;
+    }
+
+    int get_wcet(){
+      return wcet;
+    }
+
+    int get_period(){
+      return period;
+    }
+
+    int get_section1(){
+      return section1;
+    }
+
+    int get_section2(){
+      return section2;
+    }
+
+    int get_section3(){
+      return section3;
+    }
+
+
+    // setter
+    void set_nominal_priority(int n_p){
+      nominal_priority = n_p;
+    }
+
+    void set_dynamic_priority(int d_p){
+      dynamic_priority = d_p;
+    }
+
+    void set_remaining_time(int r_t){
+      remaining_time = r_t;
+    }
+
+};
+
+// ----------------------------------------------------------------------------------------------
+
+// LCD
+LiquidCrystal lcd (RS, E, D4, D5, D6, D7);
+
+// LED
+byte ready_led[TASK_NUMBER] = {car1_ready, car2_ready, car3_ready};
+byte in_led[TASK_NUMBER] = {car1_in, car2_in, car3_in};
+byte resource_led[TASK_NUMBER] = {car1_resource, car2_resource, car3_resource};
+byte out_led[TASK_NUMBER] = {car1_out, car2_out, car3_out};
+
+// TaksSet -> each task: id, type, act_time, wcet, period, deadline, sections:section1, section2, section3
+int task1_sections[SECTION_NUMBER] = {1, 1, 1};
+int task2_sections[SECTION_NUMBER] = {2, 3, 2};
+int task3_sections[SECTION_NUMBER] = {3, 5, 2};
+Task task1(1, 1, 11,  3,  0, 10, task1_sections[0], task1_sections[1], task1_sections[2]); // police car 1
+Task task2(2, 0,  1,  7, 20, 20, task2_sections[0], task2_sections[1], task2_sections[2]); // car
+Task task3(3, 0,  0, 10, 41, 41, task3_sections[0], task3_sections[1], task3_sections[2]); // truck
+
+Task taskset[TASK_NUMBER] = {task1, task2, task3};
+
+// Scheduling
+int curr_time = 0;
+int ready_tasks[TASK_NUMBER] = {0, 0, 0};
+
+
+void setup() {
+
+  // LCD
+  lcd.begin(16, 4);
+  lcd.clear();
+  lcd.print("time: 0");
+  
+  //LED
+  for(int i=0; i<TASK_NUMBER; i++){
+    pinMode(ready_led[i], OUTPUT);
+    pinMode(in_led[i], OUTPUT);
+    pinMode(resource_led[i], OUTPUT);
+    pinMode(out_led[i], OUTPUT);
+  }
+
+  for(int i=0; i<TASK_NUMBER; i++){
+    digitalWrite(ready_led[i], LOW);
+    digitalWrite(in_led[i], LOW);
+    digitalWrite(resource_led[i], LOW);
+    digitalWrite(out_led[i], LOW);
+  }
+
+  // initial nominal and dynamic priorities of tasks based on DM algorithm
+  initialize_priorities();
+  taskset[0].id = 1;
+  taskset[1].id = 2;
+  taskset[2].id = 3;
+}
+
+void loop() {
+
+  // print curr_time
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("time: ");
+  lcd.print(curr_time);
+
+  // find ready tasks
+  find_ready_tasks();
+  
+  // print ready tasks
+  lcd.setCursor(0, 1);
+  lcd.print("ready: ");
+  for(int i=0; i<TASK_NUMBER; ++i){
+    if(ready_tasks[i] == 1){
+      lcd.print(i+1);
+      lcd.print(" ");
+    }
+  }
+
+  // select next task based on DM
+  int next_task_id = find_next_task_using_DM();
+
+  // print 
+  if(next_task_id == -1){
+    lcd.setCursor(0, 2);
+    lcd.print("IDLE");
+    
+  }else{
+    lcd.setCursor(0, 2);
+    lcd.print("running: ");
+    lcd.print(next_task_id);
+
+    // NPP
+    int min_nominal_priority = get_min_nominal_priorities();   
+    for(int i=0; i<TASK_NUMBER; ++i){
+      if(taskset[i].get_id() == next_task_id){
+    
+        // change dynamic priority to min nominal priority 
+        taskset[i].set_dynamic_priority(min_nominal_priority);
+
+        // execute task
+        int remaining_time = taskset[i].get_remaining_time();
+        taskset[i].set_remaining_time(remaining_time - 1);
+
+        // if task is periodic  -> reset dynamic priority to nominal priority after finishing critical section
+        // if task is aperiodic -> do nothing and let task complete its execution
+        if(taskset[i].get_type() == 0){ // periodic
+          if(get_remaining_cs_time(taskset[i].get_id()) == 0){
+            int nominal_priority = taskset[i].get_nominal_priority();
+            taskset[i].set_dynamic_priority(nominal_priority);
+          }
+        }
+      }
+    }   
+  }
+
+  update_led_states(next_task_id);
+  
+  delay(1000);
+  curr_time++;
+}
+
+
+// FUNCTIONS DEFINITION
+
+void initialize_priorities(){
+
+  int deadlines[TASK_NUMBER];
+  for(int i=0; i<TASK_NUMBER; ++i){
+    Task task = taskset[i];
+    deadlines[i] = taskset[i].get_deadline();
+  }
+
+  // sort relative deadlines in ascending order
+  for(int i=1; i<TASK_NUMBER; ++i){
+    for(int j=i; j>0; --j){
+      if(deadlines[j-1] > deadlines[j]){
+        int tmp = deadlines[j-1];
+        deadlines[j-1] = deadlines[j];
+        deadlines[j] = tmp;
+      }
+    }
+  }
+
+  // set priorities based on sorted relative deadlines (DM algorithm)
+  for(int i=0; i<TASK_NUMBER; ++i){
+    int deadline = deadlines[i];
+    for(int j=0; j<TASK_NUMBER; ++j){
+      Task task = taskset[j];
+      if(task.get_deadline() == deadline){
+        taskset[j].set_nominal_priority(i+1);
+        taskset[j].set_dynamic_priority(i+1);
+        break;
+      }
+    }
+  } 
+}
+
+
+void find_ready_tasks(){
+
+  // find ready tasks
+  for(int i=0; i<TASK_NUMBER; i++){
+    if(taskset[i].get_act_time() <= curr_time && taskset[i].get_remaining_time() > 0){
+      ready_tasks[i] = 1;
+    }else{
+      if((taskset[i].get_type() == 0) and ((curr_time-taskset[i].get_act_time()) % taskset[i].get_period() == 0)){
+        ready_tasks[i] = 1;
+        taskset[i].set_remaining_time(taskset[i].get_wcet());
+        taskset[i].set_dynamic_priority(taskset[i].get_nominal_priority());
+      }else{
+        ready_tasks[i] = 0;
+      }
+    }
+  }
+
+  // update LEDs
+  for(int i=0; i<TASK_NUMBER; i++){
+    if(ready_tasks[i] == 1){
+      digitalWrite(ready_led[i], HIGH);
+    }else{
+      digitalWrite(ready_led[i], LOW);
+      digitalWrite(in_led[i], LOW);
+      digitalWrite(resource_led[i], LOW);
+      digitalWrite(out_led[i], LOW);
+    }
+  }
+}
+
+
+int find_next_task_using_DM(){
+
+  int next_task_id = -1;
+  
+  for(int i=0; i<TASK_NUMBER; ++i){
+    int priority = i+1;
+    for(int j=0; j<TASK_NUMBER; ++j){
+      Task task = taskset[j];
+      if(task.get_dynamic_priority() == priority && ready_tasks[task.get_id()-1] == 1){
+        next_task_id = task.get_id();
+        goto check;
+      }
+    }
+  }
+
+  // handle non-preemptive execution when a task with the same dynamic priority is activated
+  check:
+  if(next_task_id != -1){
+    Task next_task = taskset[next_task_id-1];
+    int max_nominal_priority = 0;
+    int max_nominal_priority_id = next_task.get_id();
+    for(int i=0; i<TASK_NUMBER; ++i){
+      Task curr_task = taskset[i];
+      if(ready_tasks[i] == 1){
+        if(curr_task.get_dynamic_priority() == next_task.get_dynamic_priority()){
+          if(curr_task.get_nominal_priority() > next_task.get_nominal_priority()){
+            max_nominal_priority = curr_task.get_nominal_priority();
+            max_nominal_priority_id = curr_task.get_id();
+          }
+        }
+      }
+    }
+    next_task_id = max_nominal_priority_id;
+  }
+  
+  return next_task_id;
+}
+
+
+int get_min_nominal_priorities(){
+
+  int min_p = 100;
+  for(int i=0; i<TASK_NUMBER; ++i){
+    int nominal_priority = taskset[i].get_nominal_priority();
+    if(nominal_priority < min_p){
+      min_p = nominal_priority;
+    }
+  }
+  return min_p;
+}
+
+
+int get_remaining_cs_time(int id){
+
+  Task task = taskset[id-1];
+  int remaining_section_time = -1;
+  int execution_time = task.get_wcet() - task.get_remaining_time();
+  int sections[SECTION_NUMBER] = {task.get_section1(), task.get_section2(), task.get_section3()};
+
+  int t = 0;
+  for(int i=0; i<SECTION_NUMBER; i++){
+    int section_duration = sections[i];
+    t = t + section_duration;
+    if(execution_time <= t){
+      if(i==1){ // critical section
+        remaining_section_time = t - execution_time;
+        break;
+      }
+    }
+  }
+  
+  return remaining_section_time;
+}
+
+
+void update_led_states(int task_id){
+
+  if(task_id == -1){
+    for(int i=0; i<TASK_NUMBER; i++){
+      digitalWrite(ready_led[i], LOW);
+      digitalWrite(in_led[i], LOW);
+      digitalWrite(resource_led[i], LOW);
+      digitalWrite(out_led[i], LOW);
+    }
+   
+  }else{
+    int section = find_section(task_id);
+    
+    if(section == 0){
+      digitalWrite(in_led[task_id-1], HIGH);
+    }else{
+      digitalWrite(in_led[task_id-1], LOW);
+    }
+    
+    if(section == 1){ // critical section
+      digitalWrite(resource_led[task_id-1], HIGH);
+      for(int i=0; i<TASK_NUMBER; ++i){
+        int curr_task_id = i+1;
+        if(curr_task_id != task_id){
+          int curr_section = find_section(curr_task_id);
+          if(curr_section == 1){// critical section
+            resource_led_blink(curr_task_id);
+          }
+        }
+      }
+    }else{
+      digitalWrite(resource_led[task_id-1], LOW);
+    }
+    
+    if(section == 2){
+      digitalWrite(out_led[task_id-1], HIGH);
+    } else{
+      digitalWrite(out_led[task_id-1], LOW);
+    }
+  }  
+}
+
+
+int find_section(int task_id){
+
+  Task task = taskset[task_id-1];
+  int output = -1;
+  int execution_time = task.get_wcet() - task.get_remaining_time();
+  int sections[SECTION_NUMBER] = {task.get_section1(), task.get_section2(), task.get_section3()};
+
+  int t = 0;
+  for(int i=0; i<SECTION_NUMBER; i++){
+    int section_duration = sections[i];
+    t = t + section_duration;
+    if(execution_time <= t){
+      output = i;
+      break;
+    }
+  }
+
+  return output;
+}
+
+
+void resource_led_blink(int task_id){
+  
+  int section = find_section(task_id);
+  for(int i=0; i<5; ++i){
+    digitalWrite(resource_led[task_id-1], HIGH);
+    delay(50);
+    digitalWrite(resource_led[task_id-1], LOW);
+    delay(50);
+  }
+}
